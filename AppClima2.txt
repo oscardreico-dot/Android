@@ -1,0 +1,272 @@
+Carpeta main
+ackage com.example.appclima
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.google.gson.Gson
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.net.URLEncoder
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            WeatherApp()
+        }
+    }
+}
+data class WeatherResponse(
+    val data: WeatherData,
+    val location: LocationData
+)
+data class LocationData(val name: String, val lat: Double, val lon: Double)
+data class WeatherData(val time: String, val values: WeatherValues)
+data class WeatherValues(
+    val temperature: Double,
+    val windSpeed: Double,
+    val windDirection: Double,
+    val precipitationProbability: Int,
+    val pressureSurfaceLevel: Double,
+    val rainIntensity: Int
+)
+data class TimeZoneResponse(val timeZone: String)
+@Composable
+fun WeatherApp() {
+    var country by remember { mutableStateOf("Colombia") } // Changed default for testing
+    var weatherData by remember { mutableStateOf("Enter a country and press 'Get Weather'.") }
+    val scope = rememberCoroutineScope()
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            TextField(
+                value = country,
+                onValueChange = { country = it },
+                label = { Text("Enter Country o Pais") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            Button(
+                onClick = {
+                    weatherData = "Loading weather data for $country..."
+                    scope.launch {
+                        weatherData = fetchWeatherData(country)
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Get Weather o Ver Clima")
+            }
+            Spacer(Modifier.height(16.dp))
+            val scrollState = rememberScrollState()
+            Column(modifier = Modifier.verticalScroll(scrollState)) {
+                Text(text = weatherData)
+            }
+        }
+    }
+}
+fun formatWeatherData(response: WeatherResponse, timezoneId: String?): String {
+    val values = response.data.values
+    val locationName = response.location.name
+    val timestamp = response.data.time
+
+    val utcDateTime = ZonedDateTime.parse(timestamp)
+    var timezoneNote = ""
+
+    val targetZoneId = try {
+        if (timezoneId != null) {
+            ZoneId.of(timezoneId)
+        } else {
+            timezoneNote = "\n\n(Note: Could not fetch timezone. Displaying UTC time.)"
+            utcDateTime.zone 
+        }
+    } catch (e: Exception) {
+        timezoneNote = "\n\n(Note: Invalid timezone ID '$timezoneId'. Displaying UTC time.)"
+        utcDateTime.zone 
+    }
+
+    val localDateTime = utcDateTime.withZoneSameInstant(targetZoneId)
+
+    val englishFormatter = DateTimeFormatter.ofPattern("MMMM d, yyyy - h:mm a", Locale.ENGLISH)
+    val spanishFormatter = DateTimeFormatter.ofPattern("d 'de' MMMM 'de' yyyy - h:mm a", Locale("es", "ES"))
+    val formattedDateEnglish = localDateTime.format(englishFormatter)
+    val formattedDateSpanish = localDateTime.format(spanishFormatter)
+
+    val english = """
+        --- Weather in English ---
+        Location: $locationName
+        Date & Time: $formattedDateEnglish
+        Temperature: ${values.temperature}°C
+        Wind Speed: ${values.windSpeed} kph
+        Wind Direction: ${values.windDirection}°
+        Precipitation Probability: ${values.precipitationProbability}%
+        Pressure: ${values.pressureSurfaceLevel} hPa
+        Rain Intensity: ${values.rainIntensity}
+    """.trimIndent()
+
+    val spanish = """
+        --- Clima en Español ---
+        Ubicación: $locationName
+        Fecha y Hora: $formattedDateSpanish
+        Temperatura: ${values.temperature}°C
+        Velocidad del Viento: ${values.windSpeed} kph
+        Dirección del Viento: ${values.windDirection}°
+        Probabilidad de Precipitación: ${values.precipitationProbability}%
+        Presión: ${values.pressureSurfaceLevel} hPa
+        Intensidad de Lluvia: ${values.rainIntensity}
+    """.trimIndent()
+
+    return "$english\n\n$spanish$timezoneNote"
+}
+suspend fun fetchWeatherData(country: String): String = withContext(Dispatchers.IO) {
+    val client = OkHttpClient()
+    val gson = Gson()
+
+    val encodedLocation = URLEncoder.encode(country, "UTF-8")
+    val apiKey = "TNOdFaS3CHMJCLaEaF211QR8cURuGJqW"
+    val weatherRequest = Request.Builder()
+        .url("https://api.tomorrow.io/v4/weather/realtime?location=$encodedLocation&apikey=$apiKey")
+        .get()
+        .addHeader("accept", "application/json")
+        .build()
+
+    try {
+        val weatherApiResponse = client.newCall(weatherRequest).execute()
+        if (weatherApiResponse.isSuccessful) {
+            val weatherBody = weatherApiResponse.body?.string()
+            if (weatherBody != null) {
+                val weatherResponse = gson.fromJson(weatherBody, WeatherResponse::class.java)
+
+                val lat = weatherResponse.location.lat
+                val lon = weatherResponse.location.lon
+                val tzRequest = Request.Builder()
+                    .url("https://timeapi.io/api/TimeZone/coordinate?latitude=$lat&longitude=$lon")
+                    .get().build()
+
+                try {
+                    val tzApiResponse = client.newCall(tzRequest).execute()
+                    if (tzApiResponse.isSuccessful) {
+                        val tzBody = tzApiResponse.body?.string()
+                        if (tzBody != null) {
+                            val timeZoneResponse = gson.fromJson(tzBody, TimeZoneResponse::class.java)
+                            return@withContext formatWeatherData(weatherResponse, timeZoneResponse.timeZone)
+                        }
+                    }
+                } catch (e: Exception) {
+                 
+                }
+
+                return@withContext formatWeatherData(weatherResponse, null)
+
+            } else {
+                return@withContext "Error: Empty response from server."
+            }
+        } else {
+            return@withContext "Error fetching data: ${weatherApiResponse.code} ${weatherApiResponse.message}"
+        }
+    } catch (e: Exception) { 
+        return@withContext when (e) {
+            is java.net.UnknownHostException -> "Error: Unable to connect. Please check your internet connection."
+            else -> "Error: ${e.message}"
+        }
+    }
+}
+Carpeta AndroidManifest
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+Carpeta Build kits.App
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
+}
+
+android {
+    namespace = "com.example.appclima"
+    compileSdk = 36
+
+    defaultConfig {
+        applicationId = "com.example.appclima"
+        minSdk = 24
+        targetSdk = 36
+        versionCode = 1
+        versionName = "1.0"
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+        isCoreLibraryDesugaringEnabled = true
+    }
+    kotlinOptions {
+        jvmTarget = "11"
+    }
+    buildFeatures {
+        compose = true
+    }
+}
+
+dependencies {
+
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.activity.compose)
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.material3)
+    implementation("com.squareup.retrofit2:retrofit:2.9.0")
+    implementation("com.squareup.retrofit2:converter-gson:2.9.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
+}
+
